@@ -1,0 +1,625 @@
+---
+title: "ANC Dashboard"
+author: "SPHERES"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    social: menu
+    source_code: embed
+    vertical_layout: fill
+    theme: united
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(highcharter)
+library(gt)
+library(htmltools)
+library(viridis)
+library(shiny)
+library(plotly)
+library(scales)
+library(DT)
+
+# Check if the file exists and load data
+# Note: Renamed 'df' to 'data_df' for clarity, to avoid confusion with local 'df' in functions.
+# You need to ensure 'enc_cleaned.rds' is in the same directory.
+data_df <- readRDS("enc_cleaned.rds")
+
+service_expectation <- list(
+  # Anthropometry & vitals
+  height_measurement = c("k1","k2","k3","k4","k5","k6"),
+  weight_measurement = c("k1","k2","k3","k4","k5","k6"),
+  muac_measurement   = c("k1"),
+  blood_pressure_measurement = c("k1","k2","k3","k4","k5","k6"),
+
+  # Clinical examinations
+  fundal_height_measurement  = c("k2","k3","k4","k6"),
+  fetal_heart_rate_exam      = c("k2","k3","k4","k5","k6"),
+
+  # Preventive interventions
+  tt_immunization       = c("k1"),
+  iron_supplementation  = c("k1","k2","k3","k4","k5","k6"),
+
+  # Laboratory tests
+  hb_test         = c("k1","k5"),
+  hepb_test       = c("k1"),
+  hiv_test        = c("k1"),
+  syphilis_test   = c("k1"),
+  blood_type_test = c("k1"),
+
+  # Treatments (conditional, not routine)
+  tx_anaemia        = character(0),
+  tx_preeclampsia  = character(0),
+  tx_ced           = character(0),
+
+  # Imaging & counselling
+  ultrasound_exam = c("k1","k5"),
+  counselling     = c("k1","k2","k3","k4","k5","k6"),
+  mental_health_screening = c("k1","k2","k3","k4","k5","k6")
+)
+
+service_labels <- c(
+  weight_measurement        = "Weight measurement",
+  height_measurement        = "Height measurement",
+  muac_measurement          = "MUAC measurement",
+  blood_pressure_measurement= "Blood pressure measurement",
+  fundal_height_measurement = "Fundal height measurement",
+  fetal_heart_rate_exam     = "Fetal heart rate examination",
+  tt_immunization           = "Tetanus toxoid immunization",
+  iron_supplementation      = "Iron supplementation",
+  hb_test                   = "Haemoglobin test",
+  hepb_test                 = "Hepatitis B test",
+  hiv_test                  = "HIV test",
+  syphilis_test             = "Syphilis test",
+  blood_type_test           = "Blood type test",
+  tx_anaemia                = "Treatment for anaemia",
+  tx_preeclampsia           = "Treatment for pre-eclampsia",
+  tx_ced                    = "Treatment for chronic energy deficiency",
+  ultrasound_exam           = "Ultrasound examination",
+  counselling               = "Counselling",
+  mental_health_screening   = "Mental health screening"
+)
+
+# Add this mapping to your setup chunk
+service_type_map <- list(
+  "anthro_vitals" = c("height_measurement", "weight_measurement", "muac_measurement", "blood_pressure_measurement"),
+  "clinical_exam" = c("fundal_height_measurement", "fetal_heart_rate_exam"),
+  "preventive" = c("tt_immunization", "iron_supplementation"),
+  "labs" = c("hb_test", "hepb_test", "hiv_test", "syphilis_test", "blood_type_test"),
+  "imaging_counsel" = c("ultrasound_exam", "counselling", "mental_health_screening"),
+  "intervention" = c("tx_anaemia", "tx_preeclampsia", "tx_ced")
+)
+
+intervention_pusk <- c("puskesmas suranadi", "puskesmas kaligondang", "puskesmas karang tengah", "puskesmas serayu larangan", "puskesmas bojong", "puskesmas bobotsari", "puskesmas labuapi", "puskesmas pelangan", "puskesmas sigerongan", "puskesmas gerung", "puskesmas sedau", "puskesmas karangjambu")
+
+# ---- Helper: define complete ANC visit based on bundled care ----
+is_complete_visit <- function(df) {
+  df %>%
+    mutate(
+      complete = case_when(
+        anc_period == "k1" ~ care_anthro & care_bp & care_lab & care_usg & care_counsel,
+        anc_period == "k2" ~ care_anthro & care_bp & care_fundal_height & care_counsel,
+        anc_period == "k3" ~ care_anthro & care_bp & care_fundal_height,
+        anc_period == "k4" ~ care_anthro & care_bp,
+        anc_period == "k5" ~ care_anthro & care_bp & care_lab & care_usg,
+        anc_period == "k6" ~ care_anthro & care_bp,
+        TRUE ~ FALSE
+      )
+    )
+}
+```
+
+
+
+Inputs {.sidebar}
+=========================================================
+
+**Data Status**
+
+```{r}
+pipeline_time <- attr(data_df, "pipeline_run_time")
+
+if (is.null(pipeline_time)) {
+HTML("Last data refresh: Unknown")
+} else {
+HTML(
+paste0(
+"Last data refresh: ",
+format(pipeline_time, "%d %B %Y, %H:%M WIB")
+)
+)
+}
+```
+
+**Global Filters**
+
+```{r sidebar_global}
+# 1. FIX: Changed 'enc' to 'data_df'
+dateRangeInput(
+"visit_date",
+"Visit date range",
+start = min(data_df$visit_date, na.rm = TRUE),
+end = max(data_df$visit_date, na.rm = TRUE)
+)
+
+checkboxInput(
+  "filter_current_pregnancy",
+  "Current pregnancy only (less than 42 weeks GA)",
+  value = FALSE # Default is unchecked (show all data)
+)
+
+selectInput(
+  "kabupaten",
+  "Kabupaten",
+  choices = c("All", sort(unique(data_df$kabupaten))),
+  selected = "All"
+)
+
+uiOutput("puskesmas_ui")
+
+uiOutput("kecamatan_ui")
+
+selectInput(
+  "puskesmas_type", # Changed inputId
+  "Puskesmas Type", # Changed label
+  choices = c("All", "Intervention", "Non-Intervention"),
+  selected = "All"
+)
+```
+
+**Completeness**
+
+```{r heatmap_specific filters}
+checkboxInput(
+  "show_unrequired",
+  "Include non-routine (unrequired) care",
+  value = TRUE
+)
+# Note: The functionality to grey out unrequired care is already handled in your heatmap_data logic 
+# using the 'completeness_plot' calculation based on the 'expected' column.
+```
+
+
+
+Overview
+=================================================================
+
+
+### Coverage
+
+```{r}
+plotlyOutput("sankey_plot", height = "500px")
+```
+
+### Completeness
+
+```{r}
+plotlyOutput("heatmap", height = "500px")
+```
+
+Trends
+=================================================================
+
+### Visit volume over time 
+```{r}
+plotlyOutput("visit_trend_plot")
+```
+
+Dataset
+=================================================================
+
+```{r}
+DT::dataTableOutput("anc_table")
+```
+
+
+```{r}
+# ---- Build ANC visit Sankey links (no completion logic) ----
+build_anc_visit_links <- function(df) {
+
+  stage_map <- c(
+    k1 = "ANC1",
+    k2 = "ANC2",
+    k3 = "ANC3",
+    k4 = "ANC4",
+    k5 = "ANC5",
+    k6 = "ANC6"
+  )
+
+  df <- df %>%
+    filter(anc_period %in% names(stage_map)) %>%
+    mutate(stage = stage_map[anc_period]) %>%
+    distinct(nik, stage)
+
+  paths <- df %>%
+    group_by(nik) %>%
+    summarise(stages = list(sort(unique(stage))), .groups = "drop")
+
+  links <- paths %>%
+    mutate(pairs = purrr::map(stages, \(s) {
+      if (length(s) < 2) return(NULL)
+      tibble(source = s[-length(s)], target = s[-1])
+    })) %>%
+    tidyr::unnest(pairs) %>%
+    count(source, target, name = "value")
+
+  links
+}
+```
+
+
+```{r server}
+# ---- Base filter (date + kabupaten only) ----
+base_df <- reactive({
+  df <- data_df %>%
+    filter(
+      visit_date >= input$visit_date[1],
+      visit_date <= input$visit_date[2],
+      anc_period %in% paste0("k", 1:6)
+    ) %>%
+    { if (input$kabupaten != "All") filter(., kabupaten == input$kabupaten) else . }
+  
+  # ✅ NEW LOGIC: Filter for gestational age (<= 42 weeks or 294 days)
+  if (input$filter_current_pregnancy) {
+    # Calculate difference between current system date and LMP
+    # Keep records where LMP is missing (as they are handled by a separate Sankey node)
+    # OR where the gestational age is <= 294 days
+    df <- df %>%
+      mutate(ga_days = as.numeric(Sys.Date() - lmp)) %>%
+      filter(is.na(lmp) | ga_days <= 294)
+  }
+  
+  df
+})
+
+# ---- UI filters ----
+
+output$kecamatan_ui <- renderUI({
+  req(base_df())
+  selectInput(
+    "kecamatan",
+    "Kecamatan",
+    choices = c("All", sort(unique(base_df()$kecamatan))),
+    selected = "All"
+  )
+})
+
+output$puskesmas_ui <- renderUI({
+  req(base_df(), input$kecamatan)
+
+  df <- base_df()
+  if (input$kecamatan != "All") {
+    df <- df %>% filter(kecamatan == input$kecamatan)
+  }
+
+  selectInput(
+    "puskesmas",
+    "Puskesmas",
+    choices = c("All", sort(unique(df$puskesmas))),
+    selected = "All"
+  )
+})
+
+# ---- Final filtered dataset (used by Heatmap/Sankey) ----
+
+filtered_df <- reactive({ 
+  req(input$kecamatan, input$puskesmas, input$puskesmas_type)
+  df <- base_df() 
+
+  if (input$kecamatan != "All") {
+    df <- df %>% filter(kecamatan == input$kecamatan)
+  }
+  if (input$puskesmas != "All") {
+    df <- df %>% filter(puskesmas == input$puskesmas)
+  }
+  
+  # ✅ NEW PUSKESMAS TYPE FILTER LOGIC
+  # FIRST: Puskesmas Type
+  if (input$puskesmas_type == "Intervention") {
+  df <- df %>% filter(puskesmas %in% intervention_pusk)
+  } else if (input$puskesmas_type == "Non-Intervention") {
+  df <- df %>% filter(!(puskesmas %in% intervention_pusk))
+  }
+
+  # THEN: specific Puskesmas
+  if (input$puskesmas != "All") {
+  df <- df %>% filter(puskesmas == input$puskesmas)
+}
+
+  df
+})
+
+visit_trend_data <- reactive({
+  df <- filtered_df()
+  req(nrow(df) > 0)
+
+  df %>%
+    filter(!is.na(visit_date), !is.na(puskesmas)) %>%
+    group_by(visit_date, puskesmas) %>%
+    summarise(
+      visit_count = n(),
+      .groups = "drop"
+    )
+})
+
+# ---- Sankey data: all ANC visits regardless of completion ----
+sankey_visit_data <- reactive({
+
+  df <- filtered_df()
+  req(nrow(df) > 0)
+
+  df <- df %>%
+    filter(!is.na(nik), !is.na(anc_period)) %>%
+    select(nik, anc_period)
+
+  if (nrow(df) == 0) return(NULL)
+
+  df
+})
+
+
+# =======================================================
+#                HEATMAP LOGIC
+# =======================================================
+
+# ---- Heatmap data ----
+heatmap_data <- reactive({
+  
+  # ❌ REMOVED OLD SERVICE FILTERING LOGIC: 
+  # Since "Service Type" was replaced by "Puskesmas Type", we no longer filter
+  # the services (rows) of the Heatmap here. The underlying data rows 
+  # are already filtered by the Puskesmas Type in filtered_df().
+  
+  # Base service logical columns
+  df_long <- filtered_df() %>% 
+    mutate(
+      height_measurement         = !is.na(height),
+      weight_measurement         = !is.na(weight),
+      muac_measurement           = !is.na(muac),
+      blood_pressure_measurement = !is.na(bp_sys) & !is.na(bp_dia),
+      fundal_height_measurement  = !is.na(fundal_height) & fundal_height != 0,
+      fetal_heart_rate_exam      = !is.na(fhr) & fhr != 0,
+      tt_immunization            = vac_tt == "completed",
+      iron_supplementation       = iron_supp == "completed",
+      hb_test                    = !is.na(lab_hb),
+      hepb_test                  = !is.na(lab_hepb),
+      hiv_test                   = !is.na(lab_hiv),
+      syphilis_test              = !is.na(lab_syphilis),
+      blood_type_test            = !is.na(lab_blood_type),
+      tx_anaemia                 = !is.na(tx_anaemia),
+      tx_preeclampsia            = !is.na(tx_preeclampsia),
+      tx_ced                     = !is.na(tx_ced),
+      ultrasound_exam            = !is.na(usg),
+      counselling                = counselling == "completed",
+      mental_health_screening    = mental_health == "completed"
+    ) %>%
+    pivot_longer(
+      cols = names(service_labels),
+      names_to = "service_raw",
+      values_to = "received"
+    ) %>%
+    # ❌ REMOVED: The old service filtering line
+    group_by(anc_period, service_raw) %>%
+    summarise(
+      denominator  = n(),
+      numerator    = sum(received, na.rm = TRUE),
+      completeness = numerator / denominator,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      expected = service_raw %in% names(service_expectation) & 
+                 map2_lgl(service_raw, anc_period, ~ .y %in% service_expectation[[.x]]),
+
+      completeness_plot = ifelse(
+        expected | input$show_unrequired,
+        completeness,
+        NA_real_
+      ),
+
+      anc_period = factor(anc_period, levels = paste0("k", 1:6)),
+
+      service = factor(
+        service_raw,
+        levels = rev(names(service_labels)),
+        labels = rev(service_labels)
+      )
+    )
+    
+    return(df_long)
+})
+
+
+# ---- Heatmap rendering ----
+output$heatmap <- renderPlotly({
+  df <- heatmap_data()
+
+  plot_ly(
+    data = df,
+    x = ~anc_period,
+    y = ~service,
+    z = ~completeness_plot,
+    type = "heatmap",
+    colorscale = list(
+      list(0, "#9a031e"),
+      list(0.5, "#f5d547"),
+      list(1, "#04a777")
+    ),
+    zmin = 0,
+    zmax = 1,
+    colorbar = list(title = "Completeness"),
+    hovertemplate =
+      "<b>Service:</b> %{y}<br>
+       <b>ANC period:</b> %{x}<br>
+       <b>Completeness:</b> %{z:.1%}<extra></extra>"
+  ) %>%
+    layout(
+      height = NULL, 
+      autosize = TRUE,
+      xaxis = list(title = "ANC period", fixedrange = TRUE),
+      yaxis = list(title = "", fixedrange = TRUE),
+      margin = list(l = 260, r = 20, t = 20, b = 60)
+    )
+})
+
+# =======================================================
+#                SANKEY LOGIC (FINAL CORRECTED)
+# =======================================================
+
+# NOTE: The 'sankey_base_df' reactive function must be placed BEFORE this 'output$sankey_plot'.
+# It is assumed to be the next block of code in the final file structure.
+
+output$sankey_plot <- renderPlotly({
+
+  df <- sankey_visit_data()
+
+  if (is.null(df)) {
+    return(
+      plot_ly() %>%
+        layout(
+          annotations = list(
+            text = "No ANC visits for selected filters",
+            x = 0.5, y = 0.5,
+            showarrow = FALSE,
+            xref = "paper", yref = "paper"
+          )
+        )
+    )
+  }
+
+  links <- build_anc_visit_links(df)
+
+  if (nrow(links) == 0) {
+    return(
+      plot_ly() %>%
+        layout(
+          annotations = list(
+            text = "No ANC visit progression observed",
+            x = 0.5, y = 0.5,
+            showarrow = FALSE,
+            xref = "paper", yref = "paper"
+          )
+        )
+    )
+  }
+
+  nodes <- tibble(
+    name = c("ANC1","ANC2","ANC3","ANC4","ANC5","ANC6")
+  )
+
+  node_index <- setNames(seq_len(nrow(nodes)) - 1, nodes$name)
+
+  plot_ly(
+    type = "sankey",
+    arrangement = "snap",
+    node = list(
+      label = nodes$name,
+      pad = 18,
+      thickness = 20
+    ),
+    link = list(
+      source = node_index[links$source],
+      target = node_index[links$target],
+      value  = links$value
+    )
+  )
+})
+
+output$visit_trend_plot <- renderPlotly({
+  df <- visit_trend_data()
+  req(nrow(df) > 0)
+
+  plot_ly(
+    data = df,
+    x = ~visit_date,
+    y = ~visit_count,
+    color = ~puskesmas,
+    type = "scatter",
+    mode = "lines",
+    hovertemplate =
+      "<b>Puskesmas:</b> %{legendgroup}<br>" %+%
+      "<b>Date:</b> %{x}<br>" %+%
+      "<b>Visits:</b> %{y}<extra></extra>"
+  ) %>%
+    layout(
+      xaxis = list(title = "Visit date"),
+      yaxis = list(title = "Number of visits"),
+      legend = list(
+        orientation = "v",
+        title = list(text = "Puskesmas")
+      ),
+      margin = list(l = 60, r = 20, t = 30, b = 60)
+    )
+})
+
+# live tables
+# live tables
+output$anc_table <- DT::renderDataTable({
+
+  df <- filtered_df()
+
+  DT::datatable(
+    df,
+    extensions = "Scroller",
+    options = list(
+      scrollX = TRUE,
+      scrollY = 500,
+      scroller = TRUE,
+      deferRender = TRUE,
+      pageLength = 25,
+      autoWidth = TRUE,
+
+      # remove export & buttons completely
+      dom = "frtip",
+
+      columnDefs = list(
+
+        # ---- Mask NIK (show last 4 digits only) ----
+        list(
+          targets = which(names(df) == "nik") - 1,
+          render = DT::JS("
+            function(data, type, row) {
+              if (type === 'display' && data) {
+                return data.replace(/.(?=.{4})/g, '•');
+              }
+              return data;
+            }
+          ")
+        ),
+
+        # ---- Mask phone (show last 3 digits) ----
+        list(
+          targets = which(names(df) == "phone") - 1,
+          render = DT::JS("
+            function(data, type, row) {
+              if (type === 'display' && data) {
+                return data.replace(/.(?=.{3})/g, '•');
+              }
+              return data;
+            }
+          ")
+        ),
+
+        # ---- Mask name (first + last character only) ----
+        list(
+          targets = which(names(df) == "name") - 1,
+          render = DT::JS("
+            function(data, type, row) {
+              if (type === 'display' && data) {
+                return data.replace(/^(.).*(.)$/, '$1••••$2');
+              }
+              return data;
+            }
+          ")
+        )
+
+      )
+    ),
+    filter = "top",
+    rownames = FALSE
+  )
+
+})
+```
