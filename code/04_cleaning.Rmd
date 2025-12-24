@@ -1,0 +1,668 @@
+---
+title: "ANC Sankey - Data Cleaning"
+author: "Risyad Abiyyu Siregar"
+date: "2025-12-22"
+output: html_document
+---
+
+## Data Cleaning
+
+### Encounter
+
+```{r}
+# --------------------------
+# DUPLICATE ----------------
+# --------------------------
+enc <- enc_raw
+
+# --------------------------
+# INSPECT ------------------
+# --------------------------
+skim(enc)
+
+# --------------------------
+# CONVERT ------------------
+# --------------------------
+# [TEMP] remove redundant variables
+
+# renaming variable names according to the ones in the dictionary
+enc <- enc %>%
+  # 1. Select only the columns listed in the 'old_var' column
+  select(all_of(cb_enc$old_var)) %>% 
+  
+  # 2. Transform the names using the 'new_var' column as the target names
+  rename_with(
+    .fn = ~ cb_enc$new_var[match(., cb_enc$old_var)],
+    .cols = all_of(cb_enc$old_var)
+  )
+
+# 3. Convert data types
+# Iterate over the dictionary to apply type conversion based on 'var_type'
+for (i in seq_len(nrow(cb_enc))) {
+  var <- cb_enc$new_var[i] # Use the new variable name
+  type <- cb_enc$var_type[i]
+  
+  # Check if the new variable name exists in the (now renamed) 'enc' dataframe
+  if (var %in% names(enc)) {
+    enc[[var]] <- switch(
+      type,
+      "chr" = as.character(enc[[var]]),
+      "factor" = as.factor(enc[[var]]),
+      "num" = as.numeric(enc[[var]]),
+      "int" = as.integer(enc[[var]]),
+      "date" = as.Date(enc[[var]]),
+      "datetime" = as.POSIXct(enc[[var]]),
+      enc[[var]] # fallback: unchanged
+    )
+  }
+}
+
+# --------------------------
+# STANDARDIZE --------------
+# --------------------------
+standardize_dataset <- function(df) {
+  
+  # ----- 1. Standardize identifier variables -----
+  if ("nik" %in% names(df)) {
+    df$nik <- df$nik %>%
+      as.character() %>%
+      str_replace_all("\\s+", "") %>%
+      str_replace_all("[^0-9]", "") %>%
+      na_if("")
+  }
+  
+  if ("phone" %in% names(df)) {
+    df$phone <- df$phone %>%
+      as.character() %>%
+      str_replace_all("\\s+", "") %>%
+      str_replace_all("[-()]", "") %>%
+      str_replace("^\\+62", "0") %>%
+      str_replace("^62", "0") %>%
+      str_replace_all("[^0-9]", "") %>%
+      na_if("")
+  }
+  
+  # ----- 2. Standardize ALL CHARACTER VARIABLES -----
+  df <- df %>%
+    mutate(across(
+      where(is.character),
+      ~ .x %>%
+          str_squish() %>%
+          str_to_lower() %>%
+          na_if("")
+    ))
+  
+  # ----- 3. Standardize ALL NUMERICS -----
+  df <- df %>%
+    mutate(across(
+      where(is.numeric),
+      ~ suppressWarnings(as.numeric(.x))
+    ))
+  
+  # ----- 4. Standardize ALL INTEGERS -----
+  df <- df %>%
+    mutate(across(
+      where(is.integer),
+      ~ suppressWarnings(as.integer(.x))
+    ))
+  
+  # ----- 5. Standardize ALL DATES -----
+  df <- df %>%
+  mutate(across(
+    where(~ inherits(.x, "Date")),
+    ~ as.Date(.x)
+  ))
+  
+  # ----- 6. Standardize ALL POSIXct (datetimes) -----
+  df <- df %>%
+  mutate(across(
+    where(~ inherits(.x, "POSIXct")),
+    ~ as.POSIXct(.x, tz = "")
+  ))
+  df
+}
+
+enc <- standardize_dataset(enc)
+
+# --------------------------
+# FILTER -------------------
+# --------------------------
+# no filter necessary just yet
+# --------------------------
+# DEDUPLICATE --------------
+# --------------------------
+# Count initial rows
+initial_n <- nrow(enc)
+
+# Identify duplicate NIK + visit_date (before dedup)
+enc_dups <- enc %>%
+  group_by(nik, visit_date) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+dup_n <- nrow(enc_dups)
+
+# Create helper dataset that counts missing values per row
+enc2 <- enc %>%
+  mutate(missing_n = rowSums(is.na(.)))
+
+# Deduplicate: keep the row with the fewest missing values
+enc <- enc2 %>%
+  group_by(nik, visit_date) %>%
+  slice_min(missing_n, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(-missing_n)
+
+# Count resulting rows
+final_n <- nrow(enc)
+
+# How many removed
+removed_n <- initial_n - final_n
+
+# Print transparency report
+cat(
+  "Deduplication summary:\n",
+  "• Total original encounters: ", initial_n, "\n",
+  "• Duplicate encounter rows detected: ", dup_n, "\n",
+  "• Rows removed after deduplication: ", removed_n, "\n",
+  "• Final encounters retained: ", final_n, "\n",
+  sep = ""
+)
+# --------------------------
+# VALIDATE -----------------
+# --------------------------
+# already validated
+```
+
+### Birth Data (Kobo INC form)
+
+```{r}
+# --------------------------
+# DUPLICATE ----------------
+# --------------------------
+birth <- birth_raw
+
+# --------------------------
+# INSPECT ------------------
+# --------------------------
+skim(birth)
+
+# --------------------------
+# CONVERT ------------------
+# --------------------------
+# setting up rename map
+rename_map <- setNames(cb_birth$old_var, cb_birth$new_var)
+
+birth <- birth %>%
+  select(all_of(cb_birth$old_var), kabupaten) %>%
+  rename(!!!rename_map)
+
+# 3. Continue with type conversion loop as before...
+# for (i in seq_len(nrow(cb_birth))) { ... }
+
+# 3. Convert data types
+# Iterate over the dictionary to apply type conversion based on 'var_type'
+for (i in seq_len(nrow(cb_birth))) {
+  var <- cb_birth$new_var[i] # Use the new variable name
+  type <- cb_birth$var_type[i]
+  
+  # Check if the new variable name exists in the (now renamed) 'enc' dataframe
+  if (var %in% names(birth)) {
+    birth[[var]] <- switch(
+      type,
+      "chr" = as.character(birth[[var]]),
+      "factor" = as.factor(birth[[var]]),
+      "num" = as.numeric(birth[[var]]),
+      "int" = as.integer(birth[[var]]),
+      "date" = as.Date(birth[[var]]),
+      "datetime" = as.POSIXct(birth[[var]]),
+      birth[[var]] # fallback: unchanged
+    )
+  }
+}
+
+# --------------------------
+# STANDARDIZE --------------
+# --------------------------
+birth <- standardize_dataset(birth)
+
+# --------------------------
+# FILTER -------------------
+# --------------------------
+# no filter necessary just yet
+# --------------------------
+# DEDUPLICATE --------------
+# --------------------------
+
+# --------------------------
+# VALIDATE -----------------
+# --------------------------
+# already validated
+```
+
+### Healthcare worker data (from BQ)
+```{r}
+# --------------------------
+# DUPLICATE ----------------
+# --------------------------
+hcw <- hcw_raw
+
+# --------------------------
+# INSPECT ------------------
+# --------------------------
+skim(hcw)
+
+# --------------------------
+# CONVERT ------------------
+# --------------------------
+# setting up rename map
+rename_map <- setNames(cb_hcw$old_var, cb_hcw$new_var)
+
+hcw <- hcw %>%
+  select(all_of(cb_hcw$old_var), kabupaten) %>%
+  rename(!!!rename_map)
+
+# 3. Continue with type conversion loop as before...
+# for (i in seq_len(nrow(cb_birth))) { ... }
+
+# 3. Convert data types
+# Iterate over the dictionary to apply type conversion based on 'var_type'
+for (i in seq_len(nrow(cb_hcw))) {
+  var <- cb_hcw$new_var[i] # Use the new variable name
+  type <- cb_hcw$var_type[i]
+  
+  # Check if the new variable name exists in the (now renamed) 'enc' dataframe
+  if (var %in% names(hcw)) {
+    hcw[[var]] <- switch(
+      type,
+      "chr" = as.character(hcw[[var]]),
+      "factor" = as.factor(hcw[[var]]),
+      "num" = as.numeric(hcw[[var]]),
+      "int" = as.integer(hcw[[var]]),
+      "date" = as.Date(hcw[[var]]),
+      "datetime" = as.POSIXct(hcw[[var]]),
+      hcw[[var]] # fallback: unchanged
+    )
+  }
+}
+
+# --------------------------
+# STANDARDIZE --------------
+# --------------------------
+hcw <- standardize_dataset(hcw)
+
+# --------------------------
+# FILTER -------------------
+# --------------------------
+# no filter necessary just yet
+# --------------------------
+# DEDUPLICATE --------------
+# --------------------------
+hcw <- hcw %>%
+  mutate(row_id = row_number()) %>%  # preserve original order
+  group_by(hcw_id) %>%
+  # split valid vs invalid
+  mutate(
+    valid_role = !grepl("^[0-9]+$", role)   # TRUE if role contains any letter
+  ) %>%
+  # 1. keep rows with valid roles if any exist, else keep all rows
+  filter(if (any(valid_role)) valid_role else TRUE) %>%
+  # 2. if >1 row remain, keep only last by original order
+  slice_max(order_by = row_id, n = 1) %>%
+  ungroup() %>%
+  select(-row_id, -valid_role)
+
+# --------------------------
+# VALIDATE -----------------
+# --------------------------
+# already validated
+```
+
+
+## Derivative variables
+
+### Encounter (enc)
+
+```{r}
+enc <- enc %>%
+  # --- AGE in years ---
+  mutate(
+    age = interval(dob, visit_date) / years(1)
+  ) %>%
+  # --- GESTATIONAL AGE in weeks ---
+  mutate(
+    gest_age = interval(lmp, visit_date) / weeks(1)
+  ) %>%
+  # --- ANC VISIT NUMBER (just ordering visits) ---
+  arrange(nik, visit_date) %>%
+  group_by(nik) %>%
+  mutate(
+    anc_visit_number = row_number()
+  ) %>%
+  ungroup() %>%
+  
+  # --- ANC_K = gestational age categorisation ---
+  mutate(
+    anc_k = case_when(
+      gest_age < 12 ~ "K1",
+      gest_age >= 12 & gest_age <= 20 ~ "K2",
+      gest_age >= 21 & gest_age <= 28 ~ "K3",
+      gest_age > 28 & gest_age <= 32 ~ "K4",
+      gest_age > 32 & gest_age <= 36 ~ "K5",
+      gest_age > 36 ~ "K6",
+      TRUE ~ NA_character_
+    )
+  )
+
+```
+
+
+#### Switching categorical variables
+
+```{r}
+## Systolic Blood Pressure
+enc <- enc %>%
+  mutate(
+    # Clean text
+    bp_sys_clean = bp_sys %>%
+      as.character() %>%
+      str_trim() %>%
+      str_squish() %>%
+      str_to_lower(),
+
+    # Extract numeric values (only digits)
+    bp_sys_num = suppressWarnings(as.numeric(bp_sys_clean)),
+
+    # Keep numeric values in bp_sys (set others to NA)
+    bp_sys = if_else(!is.na(bp_sys_num), bp_sys_num, NA_real_),
+
+    # Logical validity check
+    bp_sys_valid = !is.na(bp_sys) & bp_sys > 0,
+
+    # Combine categorical logic
+    bp_sys_cat = case_when(
+      # --- Text-based categories ---
+      str_detect(bp_sys_clean, "normal") ~ "normotensive",
+      str_detect(bp_sys_clean, "hyper") ~ "hypertensive",
+      str_detect(bp_sys_clean, "hypo") ~ "hypotensive",
+
+      # --- Numeric-based classification ---
+      !is.na(bp_sys) & bp_sys < 90 ~ "hypotensive",
+      !is.na(bp_sys) & bp_sys >= 90 & bp_sys <= 140 ~ "normotensive",
+      !is.na(bp_sys) & bp_sys > 140 ~ "hypertensive",
+
+      # --- Everything else ---
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-bp_sys_num)  # optional cleanup
+
+## Diastolic blood pressure
+enc <- enc %>%
+  mutate(
+    # Clean text
+    bp_dia_clean = bp_dia %>%
+      as.character() %>%
+      str_trim() %>%
+      str_squish() %>%
+      str_to_lower(),
+
+    # Extract numeric values (only digits)
+    bp_dia_num = suppressWarnings(as.numeric(bp_dia_clean)),
+
+    # Keep numeric values in bp_sys (set others to NA)
+    bp_dia = if_else(!is.na(bp_dia_num), bp_dia_num, NA_real_),
+
+    # Logical validity check
+    bp_dia_valid = !is.na(bp_dia) & bp_dia > 0,
+
+    # Combine categorical logic
+    bp_dia_cat = case_when(
+      # --- Text-based categories ---
+      str_detect(bp_dia_clean, "normal") ~ "normotensive",
+      str_detect(bp_dia_clean, "hyper") ~ "hypertensive",
+      str_detect(bp_dia_clean, "hypo") ~ "hypotensive",
+
+      # --- Numeric-based classification ---
+      !is.na(bp_dia) & bp_dia < 60 ~ "hypotensive",
+      !is.na(bp_dia) & bp_dia >= 60 & bp_dia <= 90 ~ "normotensive",
+      !is.na(bp_dia) & bp_dia > 90 ~ "hypertensive",
+
+      # --- Everything else ---
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-bp_dia_num)  # optional cleanup
+
+enc <- enc %>%
+  mutate(
+    # Keep the original fundal_height text for mapping
+    fundal_height_orig = fundal_height,
+    # 1️⃣ Convert to numeric (overwriting original variable)
+    fundal_height = parse_number(fundal_height),
+
+    # 2️⃣ Create categorical classification
+    fundal_height_cat = case_when(
+      # preg_week missing → cannot determine
+      is.na(gest_age) ~ "undeterminable",
+
+      # Numeric + within ±2 cm of GA → appropriate
+      !is.na(fundal_height) &
+        fundal_height >= gest_age - 2 &
+        fundal_height <= gest_age + 2 ~ "appropriate",
+
+      # Numeric + outside ±2 cm → inappropriate
+      !is.na(fundal_height) &
+        (fundal_height < gest_age - 2 | fundal_height > gest_age + 2) ~ "inappropriate",
+
+      # Text categories from original column
+      grepl("Sesuai", fundal_height_orig, ignore.case = TRUE) ~ "appropriate",
+      grepl("Tidak", fundal_height_orig, ignore.case = TRUE) ~ "inappropriate",
+
+      # Everything else
+      TRUE ~ NA_character_
+    ),
+
+    # Optional: make it a clean factor for easier summary/plotting
+    fundal_height_cat = factor(
+      fundal_height_cat,
+      levels = c("appropriate", "inappropriate", "undeterminable")
+    )
+  )
+enc <- enc %>% select(-fundal_height_orig)
+
+## Fetal heart rate
+enc <- enc %>%
+  mutate(
+    # Keep original text before numeric parsing
+    fhr_orig = fhr,
+
+    # 1️⃣ Convert to numeric (overwriting original variable)
+    fhr = suppressWarnings(parse_number(fhr)),
+
+    # 2️⃣ Create categorical classification
+    fhr_cat = case_when(
+      # Numeric + normal range (120–160 bpm)
+      !is.na(fhr) & fhr >= 120 & fhr <= 160 ~ "normal",
+
+      # Numeric + abnormal (<120 or >160 bpm)
+      !is.na(fhr) & (fhr < 120 | fhr > 160) ~ "abnormal",
+
+      # Text category: "Normal fetal heart rate"
+      grepl("normal", fhr_orig, ignore.case = TRUE) ~ "normal",
+
+      # Text category: "Abnormal" if explicitly mentioned
+      grepl("abnormal", fhr_orig, ignore.case = TRUE) ~ "abnormal",
+
+      # Everything else — unknown or missing
+      TRUE ~ NA_character_
+    ),
+
+    # 3️⃣ Convert to factor for cleaner analysis
+    fhr_cat = factor(fhr_cat, levels = c("normal", "abnormal"))
+  ) %>%
+  select(-fhr_orig)
+
+## Changing into numeric values for these 4 variables
+enc <- enc %>% mutate(across(c(bp_sys, bp_dia, fhr, fundal_height), as.numeric))
+```
+
+## Creation of Client-level dataset of pregnant women (preg)
+Dataset called pregnant women cohort (preg).
+Steps:
+1. Extract unique NIK from the enc dataset (data frame that contains all ANC encounters within the system)
+2. Extract some details on the patient (nik, name, dob, phone, hpht, desa, kecamatan, kabupaten)
+3. If multiple rows for a patient, choose the one with the more nonmissing data
+4. If possible, if there is still missing data and there are nonmissing data for that variable in other row, combine them
+
+```{r}
+preg_vars <- c(
+  "nik", "name", "dob", "phone", "lmp",
+  "desa", "kecamatan", "kabupaten", "puskesmas"
+)
+
+enc_min <- enc %>% select(all_of(preg_vars))
+
+preg <- enc_min %>%
+  group_by(nik) %>%
+  
+  # completeness for each row
+  mutate(
+    completeness = rowSums(!is.na(across(all_of(preg_vars[-1]))))
+  ) %>%
+  
+  arrange(desc(completeness)) %>%
+  
+  summarise(
+    across(
+      all_of(preg_vars[-1]),
+      ~ Reduce(coalesce, as.list(.x))
+    ),
+    .groups = "drop"
+  )
+```
+
+##### Comparison
+```{r, eval = FALSE}
+preg2 <- enc_min %>%
+  group_by(name, dob) %>%
+  
+  # completeness for each row (exclude 'name' and 'dob')
+  mutate(
+    completeness = rowSums(!is.na(across(all_of(preg_vars[!(preg_vars %in% c("nik","name","dob"))]))))
+  ) %>%
+  
+  arrange(desc(completeness)) %>%
+  
+  summarise(
+    # summarise all remaining variables by coalescing
+    across(
+      all_of(setdiff(preg_vars, c("name","dob"))), 
+      ~ Reduce(coalesce, as.list(.x))
+    ),
+    .groups = "drop"
+  )
+```
+
+
+
+### Adding validated 12T (logical)
+
+height measurement = !is.na(height)
+weight measurement = !is.na(weight)
+muac measurement = !is.na(muac)
+blood pressure measurement = !is.na(bp_sys) & !is.na(bp_dia)
+fundal height measurement = !is.na(fundal_height) & fundal_height != 0
+fetal heart rate examination = !is.na(fhr) & fhr != 0
+TT immunization = vac_tt == "completed"
+iron supplementation = iron_supp == "completed"
+haemoglobin laboratory test = !is.na(lab_hb)
+hepatitis B laboratory test = !is.na(lab_hepb)
+HIV laboratory test = !is.na(lab_hiv)
+syphilis laboratory test = !is.na(lab_syphilis)
+blood type laboratory test = !is.na(lab_blood_type)
+treatment for anaemia = !is.na(tx_anaemia)
+treatment for pre-eclampsia = !is.na(tx_preeclampsia)
+treatment for chronic energy deficiency = !is.na(tx_ced)
+ultrasound examination = !is.na(usg)
+counselling = counselling == "completed"
+mental health screening = mental_health == "mental_health"
+
+```{r}
+enc <- enc %>%
+  mutate(
+    # --- grouped care indicators ---
+    care_anthro         = !is.na(height) & !is.na(weight),
+    care_bp             = !is.na(bp_sys_cat) & !is.na(bp_dia_cat),
+    care_muac           = !is.na(muac),
+    care_fundal_height  = !is.na(fundal_height) & fundal_height != 0,
+    care_fhr            = !is.na(fhr) & fhr != 0,
+    care_tt             = vac_tt == "completed",
+    care_iron           = iron_supp == "completed",
+    care_lab            = !is.na(lab_hb) & !is.na(lab_hepb) & !is.na(lab_hiv) &
+                          !is.na(lab_syphilis) & !is.na(lab_blood_type),
+    care_tx             = !is.na(tx_anaemia) | !is.na(tx_preeclampsia) | !is.na(tx_ced),
+    care_usg            = !is.na(usg),
+    care_counsel        = counselling == "completed",
+    care_mh             = mental_health == "mental_health"
+  )
+
+                                           
+
+
+
+```
+
+## Creating new variable (anc_period and anc_count)
+
+```{r}
+enc <- enc %>%
+  # Derive ANC period categories (new cutoffs)
+  mutate(
+    anc_period = case_when(
+      is.na(lmp) ~ NA_character_,                      # Missing LMP
+      gest_age < 0 ~ NA_character_,        # Invalid (before LMP)
+      gest_age < 12 ~ "k1",              # <12 weeks
+      gest_age < 20 ~ "k2",              # 12–<20 weeks
+      gest_age < 28 ~ "k3",              # 20–<28 weeks
+      gest_age < 32 ~ "k4",              # 28–<32 weeks
+      gest_age < 36 ~ "k5",              # 32–<36 weeks
+      gest_age >= 36 ~ "k6",             # ≥36 weeks
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  # Create ANC visit count within each woman
+  group_by(nik) %>%
+  arrange(visit_date, .by_group = TRUE) %>%
+  mutate(
+    anc_count = row_number()
+  ) %>%
+  ungroup()
+```
+
+
+
+### Qoc
+
+```{r}
+# --- 1. Prepare the QoC lookup list ---
+qoc_requirements <- qoc %>%
+  pivot_longer(cols = starts_with("anc"), names_to = "anc_period", values_to = "required") %>%
+  filter(required) %>%
+  group_by(anc_period) %>%
+  summarise(required_vars = list(examination), .groups = "drop")
+
+# --- 2. Define a helper function to compute completeness ---
+check_qoc <- function(anc_stage, row_data) {
+  req <- qoc_requirements$required_vars[qoc_requirements$anc_period == anc_stage][[1]]
+  if (is.null(req)) return(NA)
+  
+  # Construct matching care_* variable names
+  care_vars <- paste0("care_", req)
+  care_vars <- care_vars[care_vars %in% names(row_data)]
+  
+  if (length(care_vars) == 0) return(NA)
+  
+  all(unlist(row_data[care_vars]) == TRUE)
+}
+```
